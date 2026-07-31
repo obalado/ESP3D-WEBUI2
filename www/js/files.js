@@ -101,7 +101,8 @@ function files_build_file_line(index) {
     var entry = files_file_list[index];
     var is_clickable = files_is_clickable(index);
     if ((files_filter_sd_list && entry.isprintable) || (!files_filter_sd_list)) {
-        content += "<li class='list-group-item list-group-hover' >";
+        var selected_class = gcode_preview_is_selected(files_currentPath, entry.sdname) ? " gcode-preview-selected" : "";
+        content += "<li id='files_file_" + index + "' class='list-group-item list-group-hover" + selected_class + "' >";
         content += "<div class='row'>";
         content += "<div class='col-md-5 col-sm-5 no_overflow' ";
         if (is_clickable) {
@@ -160,6 +161,7 @@ function files_build_file_line(index) {
 function files_print(index) {
     var file = files_file_list[index];
     var path = files_currentPath + file.name
+    gcode_preview_select(files_currentPath, file, index);
     files_print_filename(path);
 }
 
@@ -292,12 +294,7 @@ function files_click_file(index) {
         files_enter_dir(entry.name);
         return;
     }
-    if (false && direct_sd) {  // Don't download on click; use the button
-        //console.log("file on direct SD");
-        var url = "SD/" + files_currentPath + entry.sdname;
-        window.location.href = encodeURIComponent(url.replace("//", "/"));
-        return;
-    }
+    if (entry.isprintable) gcode_preview_select(files_currentPath, entry, index);
 }
 
 function files_isgcode(filename, isdir) {
@@ -340,6 +337,7 @@ function cleanpath(path){
 
 function files_refreshFiles(path, usecache) {
     //console.log("refresh requested " + path);
+    var clear_preview = files_currentPath != path || current_source != last_source;
     var cmdpath = path;
     files_currentPath = path;
     if (current_source != last_source){
@@ -347,6 +345,7 @@ function files_refreshFiles(path, usecache) {
         path="/";
         last_source = current_source;
     }
+    if (clear_preview) gcode_preview_clear_selection();
     if ((current_source==tft_sd) || (current_source==tft_usb)){
      displayNone('print_upload_btn');
     } else {

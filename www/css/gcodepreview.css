@@ -1,0 +1,21 @@
+.gcode-preview-body {
+    min-height: 360px;
+    padding: 0;
+    position: relative;
+}
+
+#gcode_preview_canvas {
+    display: block;
+    height: 100%;
+    min-height: 360px;
+    touch-action: none;
+    width: 100%;
+}
+
+.gcode-preview-filename {
+    margin-left: 1em;
+}
+
+.gcode-preview-selected {
+    background-color: #d9edf7;
+}

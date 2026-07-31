@@ -1,0 +1,13 @@
+<div id="gcodePreviewPanel" class="panel panel-default panel-flex-col">
+    <div class="panel-heading">
+        <b><span translate>G-code Preview</span></b>
+        <span id="gcode_preview_filename" class="gcode-preview-filename"></span>
+        <button class="btn btn-xs btn-primary pull-right" onclick="gcode_preview_fit()" translate>Fit</button>
+    </div>
+    <div class="panel-body gcode-preview-body panel-flex-main">
+        <canvas id="gcode_preview_canvas"></canvas>
+    </div>
+    <div class="panel-footer panel-footer-height">
+        <span id="gcode_preview_status" translate>Select a G-code file</span>
+    </div>
+</div>
