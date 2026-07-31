@@ -38,10 +38,6 @@ Install dependencies
 ```
 npm install
 ```
-Get submodule updates
-```
-git submodule update --init
-```
 Build the index.html.gz
 ```
 gulp package --lang en

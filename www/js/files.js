@@ -160,8 +160,6 @@ function files_build_file_line(index) {
 function files_print(index) {
     var file = files_file_list[index];
     var path = files_currentPath + file.name
-    tabletSelectGCodeFile(file.name);
-    tabletLoadGCodeFile(path, file.size);
     files_print_filename(path);
 }
 
@@ -358,7 +356,6 @@ function files_refreshFiles(path, usecache) {
     id('files_currentPath').innerHTML = files_currentPath;
     files_file_list = [];
     files_status_list = [];
-    clearTabletFileSelector("Refreshing file list");
     displayBlock('files_list_loader');
     displayBlock('files_nav_loader');
     //this is pure direct SD
@@ -496,8 +493,6 @@ function files_go_levelup() {
 
 function files_build_display_filelist(displaylist) {
     if (typeof displaylist == 'undefined') displaylist = true;
-
-    populateTabletFileSelector(files_file_list, files_currentPath, 'No files');
 
     displayNone('files_uploading_msg');
     displayNone('files_list_loader');

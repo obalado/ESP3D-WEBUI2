@@ -246,14 +246,10 @@ function control_build_macro_button(index) {
     content += entry.name;
     content += "</button>";
 
-    const icon = get_icon_svg(entry.glyph.length == 0 ? "star" : entry.glyph);
-    tabletAddMacro(entry.name, entry.class, icon, entry.target, entry.filename);
-
     return content;
 }
 
 function control_build_macro_ui() {
-    tabletClearMacros();
     var content = "<div class='tooltip'>";
     content += "<span class='tooltip-text'>Manage macros</span>"
     content += "<button class='btn btn-primary' onclick='showmacrodlg(processMacroSave)'>";

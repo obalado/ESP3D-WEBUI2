@@ -82,13 +82,13 @@ function concatApptest() {
 
 function concatApp() {
     return merge(
-        gulp.src([ 'www/js/**/*.js', 'tablet/src/tablet/*.js'])
+        gulp.src(['www/js/**/*.js'])
             .pipe(concat('app.js'))
             .pipe(removeCode({production: true}))
             .pipe(removeCode({cleanheader: true}))
             .pipe(gulp.dest('./dist/js')),
 
-        gulp.src([ 'www/css/**/*.css', 'tablet/src/tablet/*.css'])
+        gulp.src(['www/css/**/*.css'])
             .pipe(concat('style.css'))
             .pipe(gulp.dest('./dist/css/'))
     )

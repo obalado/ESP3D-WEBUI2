@@ -92,7 +92,6 @@ window.onload = function() {
         id('command-body').className = "panel-body";
         id('file-body').className = "panel-body panel-height panel-max-height panel-scroll";
     }
-    setupTablet();
 };
 
 var wsmsg = "";

@@ -1,0 +1,39 @@
+{
+  "name": "Python (uv) & Pi Agent",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "python.defaultInterpreterPath": ".venv/bin/python"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
+      ]
+    }
+  },
+  "appPort": [8000, 3000],
+  "forwardPorts": [8000, 3000],
+  "portsAttributes": {
+    "8000": {
+      "label": "API Server",
+      "onAutoForward": "notify"
+    },
+    "3000": {
+      "label": "Frontend",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=termona-pi-agent,target=/workspaces/pi-tools/pi/agent,type=volume"
+  ],
+  "remoteEnv": {
+    "PI_CODING_AGENT_DIR": "/workspaces/pi-tools/pi/agent"
+  },
+  "postCreateCommand": "sudo mkdir -p /workspaces/pi-tools/pi/agent && sudo chown -R vscode:vscode /workspaces/pi-tools && bash .devcontainer/post-create.sh"
+}
