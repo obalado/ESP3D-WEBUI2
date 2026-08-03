@@ -1,6 +1,6 @@
 var gcode_preview_max_bytes = 100 * 1024 * 1024;
 var gcode_preview_renderer = null;
-var gcode_preview_abort = null;
+var gcode_preview_worker = null;
 var gcode_preview_load_id = 0;
 var gcode_preview_selected = "";
 
@@ -31,11 +31,11 @@ function GCodePreviewRenderer(canvas) {
     this.scaleUniform = gl.getUniformLocation(this.program, "scale");
     this.colorUniform = gl.getUniformLocation(this.program, "color");
     this.buffers = [];
-    this.pending = { rapid: [], feed: [] };
     this.segmentCount = 0;
     this.centerX = 0;
     this.centerY = 0;
     this.viewHeight = 10;
+    this.drawFrame = 0;
     this.resetBounds();
     this.bindControls();
     this.resize();
@@ -58,26 +58,13 @@ GCodePreviewRenderer.prototype.resetBounds = function() {
     this.maxY = -Infinity;
 };
 
-
-GCodePreviewRenderer.prototype.add = function(type, x1, y1, x2, y2) {
-    var points = this.pending[type];
-    points.push(x1, y1, x2, y2);
-    this.minX = Math.min(this.minX, x1, x2);
-    this.minY = Math.min(this.minY, y1, y2);
-    this.maxX = Math.max(this.maxX, x1, x2);
-    this.maxY = Math.max(this.maxY, y1, y2);
-    this.segmentCount++;
-    if (points.length >= 16384) this.flush(type);
-};
-
-GCodePreviewRenderer.prototype.flush = function(type) {
-    var points = this.pending[type];
-    if (points.length == 0) return;
+GCodePreviewRenderer.prototype.addBuffer = function(type, arrayBuffer, floatCount) {
+    var points = new Float32Array(arrayBuffer, 0, floatCount);
     var buffer = this.gl.createBuffer();
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, buffer);
-    this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(points), this.gl.STATIC_DRAW);
-    this.buffers.push({ buffer: buffer, count: points.length / 2, type: type });
-    this.pending[type] = [];
+    this.gl.bufferData(this.gl.ARRAY_BUFFER, points, this.gl.STATIC_DRAW);
+    this.buffers.push({ buffer: buffer, count: floatCount / 2, type: type });
+    this.segmentCount += floatCount / 4;
 };
 
 GCodePreviewRenderer.prototype.clear = function() {
@@ -85,15 +72,16 @@ GCodePreviewRenderer.prototype.clear = function() {
         this.gl.deleteBuffer(this.buffers[i].buffer);
     }
     this.buffers = [];
-    this.pending = { rapid: [], feed: [] };
     this.segmentCount = 0;
     this.resetBounds();
-    this.draw();
+    this.requestDraw();
 };
 
-GCodePreviewRenderer.prototype.finish = function() {
-    this.flush("rapid");
-    this.flush("feed");
+GCodePreviewRenderer.prototype.setBounds = function(bounds) {
+    this.minX = bounds.minX;
+    this.minY = bounds.minY;
+    this.maxX = bounds.maxX;
+    this.maxY = bounds.maxY;
 };
 
 GCodePreviewRenderer.prototype.fit = function() {
@@ -105,7 +93,7 @@ GCodePreviewRenderer.prototype.fit = function() {
     this.centerX = (this.minX + this.maxX) / 2;
     this.centerY = (this.minY + this.maxY) / 2;
     this.viewHeight = Math.max(height, width / aspect) * 1.1;
-    this.draw();
+    this.requestDraw();
 };
 
 GCodePreviewRenderer.prototype.resize = function() {
@@ -118,6 +106,15 @@ GCodePreviewRenderer.prototype.resize = function() {
         this.canvas.height = height;
     }
     this.gl.viewport(0, 0, width, height);
+};
+
+GCodePreviewRenderer.prototype.requestDraw = function() {
+    if (this.drawFrame) return;
+    var renderer = this;
+    this.drawFrame = requestAnimationFrame(function() {
+        renderer.drawFrame = 0;
+        renderer.draw();
+    });
 };
 
 GCodePreviewRenderer.prototype.draw = function() {
@@ -164,119 +161,201 @@ GCodePreviewRenderer.prototype.bindControls = function() {
         renderer.centerY += (event.clientY - lastY) * scale;
         lastX = event.clientX;
         lastY = event.clientY;
-        renderer.draw();
+        renderer.requestDraw();
     });
     this.canvas.addEventListener("wheel", function(event) {
         event.preventDefault();
         renderer.viewHeight *= event.deltaY < 0 ? 0.8 : 1.25;
-        renderer.draw();
+        renderer.requestDraw();
     }, { passive: false });
 };
 
-function GCodePreviewParser(segmentFn) {
-    this.segmentFn = segmentFn;
-    this.x = 0;
-    this.y = 0;
-    this.z = 0;
-    this.motion = 0;
-    this.absolute = true;
-    this.arcAbsolute = false;
-    this.unit = 1;
-    this.plane = 17;
-    this.warnings = 0;
-}
+function gcode_preview_worker_main() {
+    var chunkFloats = 65536 * 4;
 
-GCodePreviewParser.prototype.line = function(text) {
-    text = text.replace(/\([^)]*\)/g, "");
-    text = text.split(";")[0];
-    var regex = /([A-Za-z])\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g;
-    var words = {};
-    var suppressMotion = false;
-    var match;
-    while ((match = regex.exec(text)) !== null) {
-        var letter = match[1].toUpperCase();
-        var value = Number(match[2]);
-        if (letter == "G") {
-            if (value == 0 || value == 1 || value == 2 || value == 3) this.motion = value;
-            else if (value == 17 || value == 18 || value == 19) this.plane = value;
-            else if (value == 20) this.unit = 25.4;
-            else if (value == 21) this.unit = 1;
-            else if (value == 90) this.absolute = true;
-            else if (value == 91) this.absolute = false;
-            else if (value == 90.1) this.arcAbsolute = true;
-            else if (value == 91.1) this.arcAbsolute = false;
-            else if (value == 10 || value == 28 || value == 30 || value == 43.1 || value == 92) suppressMotion = true;
+    function Parser(segmentFn) {
+        this.segmentFn = segmentFn;
+        this.x = 0;
+        this.y = 0;
+        this.z = 0;
+        this.motion = 0;
+        this.absolute = true;
+        this.arcAbsolute = false;
+        this.unit = 1;
+        this.plane = 17;
+        this.warnings = 0;
+    }
+
+    Parser.prototype.line = function(text) {
+        text = text.replace(/\([^)]*\)/g, "");
+        text = text.split(";")[0];
+        var regex = /([A-Za-z])\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g;
+        var words = {};
+        var suppressMotion = false;
+        var match;
+        while ((match = regex.exec(text)) !== null) {
+            var letter = match[1].toUpperCase();
+            var value = Number(match[2]);
+            if (letter == "G") {
+                if (value == 0 || value == 1 || value == 2 || value == 3) this.motion = value;
+                else if (value == 17 || value == 18 || value == 19) this.plane = value;
+                else if (value == 20) this.unit = 25.4;
+                else if (value == 21) this.unit = 1;
+                else if (value == 90) this.absolute = true;
+                else if (value == 91) this.absolute = false;
+                else if (value == 90.1) this.arcAbsolute = true;
+                else if (value == 91.1) this.arcAbsolute = false;
+                else if (value == 10 || value == 28 || value == 30 || value == 43.1 || value == 92) suppressMotion = true;
+            } else {
+                words[letter] = value;
+            }
+        }
+        var hasAxis = words.X !== undefined || words.Y !== undefined || words.Z !== undefined;
+        var hasArc = words.I !== undefined || words.J !== undefined || words.R !== undefined;
+        if (suppressMotion || (!hasAxis && !(hasArc && (this.motion == 2 || this.motion == 3)))) return;
+
+        var x = words.X === undefined ? this.x : (this.absolute ? words.X * this.unit : this.x + words.X * this.unit);
+        var y = words.Y === undefined ? this.y : (this.absolute ? words.Y * this.unit : this.y + words.Y * this.unit);
+        var z = words.Z === undefined ? this.z : (this.absolute ? words.Z * this.unit : this.z + words.Z * this.unit);
+        if (this.motion == 0 || this.motion == 1) {
+            if (x != this.x || y != this.y) this.segmentFn(this.motion == 0 ? "rapid" : "feed", this.x, this.y, x, y);
+        } else if (this.motion == 2 || this.motion == 3) {
+            if (this.plane == 17) this.arc(this.motion == 2, x, y, words);
+            else {
+                this.warnings++;
+                if (x != this.x || y != this.y) this.segmentFn("feed", this.x, this.y, x, y);
+            }
+        }
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    };
+
+    Parser.prototype.arc = function(clockwise, x, y, words) {
+        var centerX;
+        var centerY;
+        if (words.R !== undefined) {
+            var radius = words.R * this.unit;
+            var dx = x - this.x;
+            var dy = y - this.y;
+            var chord = Math.sqrt(dx * dx + dy * dy);
+            if (chord == 0 || Math.abs(radius) < chord / 2) {
+                this.warnings++;
+                this.segmentFn("feed", this.x, this.y, x, y);
+                return;
+            }
+            var h = Math.sqrt(radius * radius - chord * chord / 4);
+            var sign = (clockwise ? -1 : 1) * (radius < 0 ? -1 : 1);
+            centerX = (this.x + x) / 2 - dy * h * sign / chord;
+            centerY = (this.y + y) / 2 + dx * h * sign / chord;
         } else {
-            words[letter] = value;
+            if (words.I === undefined && words.J === undefined) {
+                this.warnings++;
+                if (x != this.x || y != this.y) this.segmentFn("feed", this.x, this.y, x, y);
+                return;
+            }
+            var i = (words.I || 0) * this.unit;
+            var j = (words.J || 0) * this.unit;
+            centerX = this.arcAbsolute ? i : this.x + i;
+            centerY = this.arcAbsolute ? j : this.y + j;
         }
-    }
-    var hasAxis = words.X !== undefined || words.Y !== undefined || words.Z !== undefined;
-    var hasArc = words.I !== undefined || words.J !== undefined || words.R !== undefined;
-    if (suppressMotion || (!hasAxis && !(hasArc && (this.motion == 2 || this.motion == 3)))) return;
+        var startAngle = Math.atan2(this.y - centerY, this.x - centerX);
+        var endAngle = Math.atan2(y - centerY, x - centerX);
+        var sweep = endAngle - startAngle;
+        if (clockwise && sweep >= 0) sweep -= Math.PI * 2;
+        if (!clockwise && sweep <= 0) sweep += Math.PI * 2;
+        var segments = Math.min(180, Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 36))));
+        var oldX = this.x;
+        var oldY = this.y;
+        var radiusValue = Math.sqrt((this.x - centerX) * (this.x - centerX) + (this.y - centerY) * (this.y - centerY));
+        for (var n = 1; n <= segments; n++) {
+            var angle = startAngle + sweep * n / segments;
+            var nextX = n == segments ? x : centerX + radiusValue * Math.cos(angle);
+            var nextY = n == segments ? y : centerY + radiusValue * Math.sin(angle);
+            this.segmentFn("feed", oldX, oldY, nextX, nextY);
+            oldX = nextX;
+            oldY = nextY;
+        }
+    };
 
-    var x = words.X === undefined ? this.x : (this.absolute ? words.X * this.unit : this.x + words.X * this.unit);
-    var y = words.Y === undefined ? this.y : (this.absolute ? words.Y * this.unit : this.y + words.Y * this.unit);
-    var z = words.Z === undefined ? this.z : (this.absolute ? words.Z * this.unit : this.z + words.Z * this.unit);
-    if (this.motion == 0 || this.motion == 1) {
-        if (x != this.x || y != this.y) this.segmentFn(this.motion == 0 ? "rapid" : "feed", this.x, this.y, x, y);
-    } else if (this.motion == 2 || this.motion == 3) {
-        if (this.plane == 17) this.arc(this.motion == 2, x, y, words);
-        else {
-            this.warnings++;
-            if (x != this.x || y != this.y) this.segmentFn("feed", this.x, this.y, x, y);
-        }
-    }
-    this.x = x;
-    this.y = y;
-    this.z = z;
-};
+    self.onmessage = async function(event) {
+        var options = event.data;
+        var pending = {
+            rapid: { points: new Float32Array(chunkFloats), used: 0 },
+            feed: { points: new Float32Array(chunkFloats), used: 0 }
+        };
+        var minX = Infinity;
+        var minY = Infinity;
+        var maxX = -Infinity;
+        var maxY = -Infinity;
+        var segmentCount = 0;
 
-GCodePreviewParser.prototype.arc = function(clockwise, x, y, words) {
-    var centerX;
-    var centerY;
-    if (words.R !== undefined) {
-        var radius = words.R * this.unit;
-        var dx = x - this.x;
-        var dy = y - this.y;
-        var chord = Math.sqrt(dx * dx + dy * dy);
-        if (chord == 0 || Math.abs(radius) < chord / 2) {
-            this.warnings++;
-            this.segmentFn("feed", this.x, this.y, x, y);
-            return;
+        function flush(type) {
+            var item = pending[type];
+            if (!item.used) return;
+            var buffer = item.points.buffer;
+            self.postMessage({ type: "chunk", motion: type, buffer: buffer, floatCount: item.used }, [buffer]);
+            item.points = new Float32Array(chunkFloats);
+            item.used = 0;
         }
-        var h = Math.sqrt(radius * radius - chord * chord / 4);
-        var sign = (clockwise ? -1 : 1) * (radius < 0 ? -1 : 1);
-        centerX = (this.x + x) / 2 - dy * h * sign / chord;
-        centerY = (this.y + y) / 2 + dx * h * sign / chord;
-    } else {
-        if (words.I === undefined && words.J === undefined) {
-            this.warnings++;
-            if (x != this.x || y != this.y) this.segmentFn("feed", this.x, this.y, x, y);
-            return;
+
+        function add(type, x1, y1, x2, y2) {
+            var item = pending[type];
+            item.points[item.used++] = x1;
+            item.points[item.used++] = y1;
+            item.points[item.used++] = x2;
+            item.points[item.used++] = y2;
+            minX = Math.min(minX, x1, x2);
+            minY = Math.min(minY, y1, y2);
+            maxX = Math.max(maxX, x1, x2);
+            maxY = Math.max(maxY, y1, y2);
+            segmentCount++;
+            if (item.used == chunkFloats) flush(type);
         }
-        var i = (words.I || 0) * this.unit;
-        var j = (words.J || 0) * this.unit;
-        centerX = this.arcAbsolute ? i : this.x + i;
-        centerY = this.arcAbsolute ? j : this.y + j;
-    }
-    var startAngle = Math.atan2(this.y - centerY, this.x - centerX);
-    var endAngle = Math.atan2(y - centerY, x - centerX);
-    var sweep = endAngle - startAngle;
-    if (clockwise && sweep >= 0) sweep -= Math.PI * 2;
-    if (!clockwise && sweep <= 0) sweep += Math.PI * 2;
-    var segments = Math.min(180, Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 36))));
-    var oldX = this.x;
-    var oldY = this.y;
-    var radiusValue = Math.sqrt((this.x - centerX) * (this.x - centerX) + (this.y - centerY) * (this.y - centerY));
-    for (var n = 1; n <= segments; n++) {
-        var angle = startAngle + sweep * n / segments;
-        var nextX = n == segments ? x : centerX + radiusValue * Math.cos(angle);
-        var nextY = n == segments ? y : centerY + radiusValue * Math.sin(angle);
-        this.segmentFn("feed", oldX, oldY, nextX, nextY);
-        oldX = nextX;
-        oldY = nextY;
-    }
-};
+
+        try {
+            var response = await fetch(options.url, { credentials: "same-origin" });
+            if (!response.ok) throw new Error("File load failed (" + response.status + ")");
+            if (!response.body || !response.body.getReader) throw new Error("Streaming is not supported by this browser");
+            var reader = response.body.getReader();
+            var decoder = new TextDecoder("utf-8");
+            var parser = new Parser(add);
+            var tail = "";
+            var bytes = 0;
+            var lastStatus = 0;
+            while (true) {
+                var result = await reader.read();
+                if (result.done) break;
+                bytes += result.value.byteLength;
+                if (bytes > options.maxBytes) throw new Error("File exceeds 100 MB preview limit");
+                var text = tail + decoder.decode(result.value, { stream: true });
+                var lines = text.split(/\r?\n/);
+                tail = lines.pop();
+                for (var line = 0; line < lines.length; line++) parser.line(lines[line]);
+                if (Date.now() - lastStatus > 250) {
+                    var percent = options.expectedSize > 0 ? Math.min(100, Math.round(bytes * 100 / options.expectedSize)) : 0;
+                    self.postMessage({ type: "progress", percent: percent });
+                    lastStatus = Date.now();
+                }
+            }
+            tail += decoder.decode();
+            if (tail.length) parser.line(tail);
+            flush("rapid");
+            flush("feed");
+            self.postMessage({
+                type: "done",
+                minX: minX,
+                minY: minY,
+                maxX: maxX,
+                maxY: maxY,
+                segmentCount: segmentCount,
+                warnings: parser.warnings
+            });
+        } catch (error) {
+            self.postMessage({ type: "error", message: error.message });
+        }
+    };
+}
 
 function gcode_preview_status(text) {
     id("gcode_preview_status").textContent = text;
@@ -291,60 +370,68 @@ function gcode_preview_url(path, name) {
     return "/SD/" + encoded.join("/");
 }
 
-async function gcode_preview_stream(url, expectedSize, phase, segmentFn, loadId) {
-    var response = await fetch(url, { signal: gcode_preview_abort.signal, credentials: "same-origin" });
-    if (!response.ok) throw new Error("File load failed (" + response.status + ")");
-    if (!response.body || !response.body.getReader) throw new Error("Streaming is not supported by this browser");
-    var reader = response.body.getReader();
-    var decoder = new TextDecoder("utf-8");
-    var parser = new GCodePreviewParser(segmentFn);
-    var tail = "";
-    var bytes = 0;
-    var lastStatus = 0;
-    while (true) {
-        var result = await reader.read();
-        if (loadId != gcode_preview_load_id) return null;
-        if (result.done) break;
-        bytes += result.value.byteLength;
-        if (bytes > gcode_preview_max_bytes) throw new Error("File exceeds 100 MB preview limit");
-        var text = tail + decoder.decode(result.value, { stream: true });
-        var lines = text.split(/\r?\n/);
-        tail = lines.pop();
-        for (var i = 0; i < lines.length; i++) parser.line(lines[i]);
-        if (Date.now() - lastStatus > 250) {
-            var percent = expectedSize > 0 ? Math.min(100, Math.round(bytes * 100 / expectedSize)) : 0;
-            gcode_preview_status(phase + (percent ? " " + percent + "%" : ""));
-            lastStatus = Date.now();
-        }
-    }
-    tail += decoder.decode();
-    if (tail.length) parser.line(tail);
-    return parser;
+function gcode_preview_stop_worker(worker) {
+    if (!worker) return;
+    worker.terminate();
+    URL.revokeObjectURL(worker.previewUrl);
+    if (gcode_preview_worker == worker) gcode_preview_worker = null;
 }
 
-async function gcode_preview_load(path, entry, loadId) {
+function gcode_preview_load(path, entry, loadId) {
     var size = Number(entry.size);
     if (isNaN(size)) size = 0;
     if (size > gcode_preview_max_bytes) throw new Error("File exceeds 100 MB preview limit");
     if (!gcode_preview_renderer) gcode_preview_renderer = new GCodePreviewRenderer(id("gcode_preview_canvas"));
     gcode_preview_renderer.clear();
 
-    var parser = await gcode_preview_stream(gcode_preview_url(path, entry.sdname), size, "Loading", function(type, x1, y1, x2, y2) {
-        gcode_preview_renderer.add(type, x1, y1, x2, y2);
-    }, loadId);
-    if (!parser || loadId != gcode_preview_load_id) return;
-    gcode_preview_renderer.finish();
-    gcode_preview_renderer.fit();
-    var status = gcode_preview_renderer.segmentCount + " segments";
-    if (parser.warnings) status += ", " + parser.warnings + " unsupported arcs";
-    gcode_preview_status(status);
+    var source = "(" + gcode_preview_worker_main.toString() + ")()";
+    var workerUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+    var worker;
+    try {
+        worker = new Worker(workerUrl);
+    } catch (error) {
+        URL.revokeObjectURL(workerUrl);
+        throw error;
+    }
+    worker.previewUrl = workerUrl;
+    gcode_preview_worker = worker;
+    worker.onmessage = function(event) {
+        if (loadId != gcode_preview_load_id) return;
+        var message = event.data;
+        if (message.type == "progress") {
+            gcode_preview_status("Loading" + (message.percent ? " " + message.percent + "%" : ""));
+        } else if (message.type == "chunk") {
+            gcode_preview_renderer.addBuffer(message.motion, message.buffer, message.floatCount);
+        } else if (message.type == "done") {
+            gcode_preview_stop_worker(worker);
+            gcode_preview_renderer.setBounds(message);
+            gcode_preview_renderer.fit();
+            var status = message.segmentCount + " segments";
+            if (message.warnings) status += ", " + message.warnings + " unsupported arcs";
+            gcode_preview_status(status);
+        } else if (message.type == "error") {
+            gcode_preview_stop_worker(worker);
+            gcode_preview_renderer.clear();
+            gcode_preview_status(message.message);
+        }
+    };
+    worker.onerror = function(event) {
+        if (loadId != gcode_preview_load_id) return;
+        gcode_preview_stop_worker(worker);
+        gcode_preview_renderer.clear();
+        gcode_preview_status(event.message || "Preview worker failed");
+    };
+    worker.postMessage({
+        url: new URL(gcode_preview_url(path, entry.sdname), window.location.href).href,
+        expectedSize: size,
+        maxBytes: gcode_preview_max_bytes
+    });
 }
 
 function gcode_preview_select(path, entry, index) {
     if (!entry.isprintable) return;
     gcode_preview_load_id++;
-    if (gcode_preview_abort) gcode_preview_abort.abort();
-    gcode_preview_abort = new AbortController();
+    gcode_preview_stop_worker(gcode_preview_worker);
     gcode_preview_selected = path + entry.sdname;
     id("gcode_preview_filename").textContent = entry.name;
     gcode_preview_status("Loading");
@@ -352,9 +439,11 @@ function gcode_preview_select(path, entry, index) {
     for (var i = 0; i < selected.length; i++) selected[i].classList.remove("gcode-preview-selected");
     var row = id("files_file_" + index);
     if (row) row.classList.add("gcode-preview-selected");
-    gcode_preview_load(path, entry, gcode_preview_load_id).catch(function(error) {
-        if (error.name != "AbortError") gcode_preview_status(error.message);
-    });
+    try {
+        gcode_preview_load(path, entry, gcode_preview_load_id);
+    } catch (error) {
+        gcode_preview_status(error.message);
+    }
 }
 
 function gcode_preview_is_selected(path, name) {
@@ -363,7 +452,7 @@ function gcode_preview_is_selected(path, name) {
 
 function gcode_preview_clear_selection() {
     gcode_preview_load_id++;
-    if (gcode_preview_abort) gcode_preview_abort.abort();
+    gcode_preview_stop_worker(gcode_preview_worker);
     gcode_preview_selected = "";
     var filename = id("gcode_preview_filename");
     if (filename) filename.textContent = "";
@@ -377,5 +466,5 @@ function gcode_preview_fit() {
 }
 
 window.addEventListener("resize", function() {
-    if (gcode_preview_renderer) gcode_preview_renderer.draw();
+    if (gcode_preview_renderer) gcode_preview_renderer.requestDraw();
 });

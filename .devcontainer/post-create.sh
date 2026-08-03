@@ -19,7 +19,7 @@ fi
 
 PERSIST=/workspaces/pi-tools
 PUBLIC_PI_PACKAGES=(
-  "npm:@narumitw/pi-codex-usage"
+  "npm:@narumitw/pi-usage"
   "git:github.com/obalado/pi-hashline-context-edit"
 )
 PRIVATE_SSH_PI_PACKAGES=(
